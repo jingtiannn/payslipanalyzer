@@ -644,7 +644,7 @@ FIELD_SANE_RANGE: dict[str, tuple[float, float]] = {
     "basic_salary": (500,    100_000),
     "allowances":   (1,       20_000),
     "epf":          (1,       11_000),   # 11 % of RM 100k
-    "socso":        (1,           25),   # hard statutory cap ≈ RM 24.75
+    "socso":        (1,           45),   # new 6-band table max = RM 39.75 (band 3501-4000)
     "pcb":          (0,        3_000),
     "eis":          (0.5,          9),   # 0.2 % × RM 4,000 cap = RM 8.00
     "net_pay":      (200,    100_000),
@@ -994,6 +994,25 @@ def extract_fields(raw_text: str,
                 fields["basic_salary"] + fields["allowances"], 2
             )
             print("[OCR] Gross salary derived from basic + allowances.")
+
+    # Sanity: gross must be >= basic salary.
+    # In two-column layouts, OCR noise can corrupt "2,900.00" → "900.00"
+    # (the leading digit gets merged with separator noise and dropped).
+    # If detected gross < basic, it's clearly wrong — recompute.
+    if (fields["gross_salary"] is not None
+            and fields["basic_salary"] is not None
+            and fields["gross_salary"] < fields["basic_salary"]):
+        if fields["allowances"] is not None:
+            corrected = round(fields["basic_salary"] + fields["allowances"], 2)
+            print(f"[OCR] Gross corrected: detected RM {fields['gross_salary']:,.2f} "
+                  f"< basic RM {fields['basic_salary']:,.2f}; "
+                  f"recomputed from basic + allowances = RM {corrected:,.2f}")
+            fields["gross_salary"] = corrected
+        else:
+            # No allowances known — at minimum gross equals basic
+            print(f"[OCR] Gross corrected: detected RM {fields['gross_salary']:,.2f} "
+                  f"< basic; set to basic RM {fields['basic_salary']:,.2f}")
+            fields["gross_salary"] = fields["basic_salary"]
 
     # Math-consistency check: basic + allowances should equal gross.
     # If they don't (because some overtime/allowance rows were missed by OCR),
