@@ -1646,6 +1646,171 @@ def generate_bar_chart(fields: dict, financials: dict, output_path: str) -> None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# PUBLIC API  (called by OpenClaw tool wrapper)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def analyze_payslip(image_path: str, output_dir: str = "output") -> dict:
+    """
+    OpenClaw entry point — runs the full pipeline and returns a structured dict.
+
+    Parameters
+    ----------
+    image_path : str
+        Absolute or relative path to the payslip image (JPG / PNG).
+    output_dir : str
+        Directory where the three chart PNGs will be saved.
+        Created automatically if it does not exist.
+
+    Returns
+    -------
+    dict with keys:
+        status_code              "OK" | "ERROR_FILE_NOT_FOUND" |
+                                 "ERROR_NO_TEXT" | "ERROR_PIPELINE"
+        text_summary             Full analysis report as a string (None on error).
+        salary_chart_path        Absolute path to salary_chart.png (None on error).
+        loan_chart_path          Absolute path to loan_chart.png (None on error).
+        employer_cost_chart_path Absolute path to employer_cost_chart.png (None on error).
+        error_message            Human-readable error detail (None on success).
+        fields                   Raw extracted field dict (None on hard error).
+    """
+    import io as _io
+
+    # ── Guard: file must exist and be a supported format ───────────────────
+    if not os.path.isfile(image_path):
+        return {
+            "status_code": "ERROR_FILE_NOT_FOUND",
+            "text_summary": None,
+            "salary_chart_path": None,
+            "loan_chart_path": None,
+            "employer_cost_chart_path": None,
+            "error_message": (
+                "Could not read image, please try again. "
+                f"(File not found: {image_path})"
+            ),
+            "fields": None,
+        }
+
+    ext = os.path.splitext(image_path)[1].lower()
+    if ext not in (".jpg", ".jpeg", ".png"):
+        return {
+            "status_code": "ERROR_PIPELINE",
+            "text_summary": None,
+            "salary_chart_path": None,
+            "loan_chart_path": None,
+            "employer_cost_chart_path": None,
+            "error_message": (
+                "Could not read image, please try again. "
+                f"(Unsupported format '{ext}' — only JPG and PNG are accepted.)"
+            ),
+            "fields": None,
+        }
+
+    os.makedirs(output_dir, exist_ok=True)
+    pie_path      = os.path.abspath(os.path.join(output_dir, "salary_chart.png"))
+    bar_path      = os.path.abspath(os.path.join(output_dir, "loan_chart.png"))
+    employer_path = os.path.abspath(os.path.join(output_dir, "employer_cost_chart.png"))
+
+    try:
+        # ── Step 1: Preprocess ─────────────────────────────────────────────
+        binary = preprocess(image_path)
+
+        # ── Step 2: OCR ───────────────────────────────────────────────────
+        raw_text = run_ocr(binary)
+
+        if not raw_text or not raw_text.strip():
+            return {
+                "status_code": "ERROR_NO_TEXT",
+                "text_summary": None,
+                "salary_chart_path": None,
+                "loan_chart_path": None,
+                "employer_cost_chart_path": None,
+                "error_message": (
+                    "No text detected, please send a clearer image. "
+                    "Tip: retake the photo in bright, even lighting with "
+                    "the payslip lying flat."
+                ),
+                "fields": None,
+            }
+
+        # ── Step 3: Field extraction ───────────────────────────────────────
+        fields = extract_fields(raw_text, binary)
+
+        # If neither gross nor net pay could be found, OCR effectively failed
+        if fields.get("gross_salary") is None and fields.get("net_pay") is None:
+            return {
+                "status_code": "ERROR_NO_TEXT",
+                "text_summary": None,
+                "salary_chart_path": None,
+                "loan_chart_path": None,
+                "employer_cost_chart_path": None,
+                "error_message": (
+                    "No text detected, please send a clearer image. "
+                    "Could not locate gross salary or net pay on the payslip."
+                ),
+                "fields": fields,
+            }
+
+        # ── Step 4-5: Validation + financials ─────────────────────────────
+        validation = run_validation(fields)
+        financials = calculate_financials(fields["net_pay"])
+
+        # ── Capture text summary (print_summary writes to stdout) ──────────
+        buf         = _io.StringIO()
+        _old_stdout = sys.stdout
+        sys.stdout  = buf
+        try:
+            print_summary(fields, validation, financials)
+        finally:
+            sys.stdout = _old_stdout
+        text_summary = buf.getvalue()
+
+        # ── Step 6: Charts (each failure is non-fatal) ─────────────────────
+        salary_chart_path        = None
+        loan_chart_path          = None
+        employer_cost_chart_path = None
+
+        try:
+            generate_pie_chart(fields, pie_path)
+            salary_chart_path = pie_path
+        except Exception as chart_err:
+            print(f"[Warning] Salary chart skipped: {chart_err}", file=sys.stderr)
+
+        try:
+            generate_bar_chart(fields, financials, bar_path)
+            loan_chart_path = bar_path
+        except Exception as chart_err:
+            print(f"[Warning] Loan chart skipped: {chart_err}", file=sys.stderr)
+
+        try:
+            generate_employer_cost_chart(fields, validation, employer_path)
+            employer_cost_chart_path = employer_path
+        except Exception as chart_err:
+            print(f"[Warning] Employer cost chart skipped: {chart_err}",
+                  file=sys.stderr)
+
+        return {
+            "status_code": "OK",
+            "text_summary": text_summary,
+            "salary_chart_path": salary_chart_path,
+            "loan_chart_path": loan_chart_path,
+            "employer_cost_chart_path": employer_cost_chart_path,
+            "error_message": None,
+            "fields": fields,
+        }
+
+    except Exception as exc:
+        return {
+            "status_code": "ERROR_PIPELINE",
+            "text_summary": None,
+            "salary_chart_path": None,
+            "loan_chart_path": None,
+            "employer_cost_chart_path": None,
+            "error_message": f"Pipeline error: {exc}",
+            "fields": None,
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # MAIN ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════
 
